@@ -430,6 +430,46 @@ class LanganWindow(QMainWindow):
         layout.addLayout(row)
         return container, field
 
+    def admin_dashboard(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(16)
+
+        title = QLabel("Welcome to Langan Admin")
+        title.setObjectName("heading")
+        layout.addWidget(title)
+
+        description = QLabel(
+            "Manage the intelligence and configuration "
+            "behind your Langan AI assistant."
+        )
+        description.setObjectName("muted")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        sections = [
+            ("Logic", "Manage Smol and the logic engine.", 1),
+            ("Planning", "Configure the Qwen planning model.", 2),
+            ("Premise Prompt", "Control premise generation.", 3),
+            ("Web Engine", "Configure web information retrieval.", 4),
+            ("Evidence Prompt", "Configure analogy verification.", 5),
+        ]
+
+        for name, description, index in sections:
+            button = QPushButton(
+                f"{name}  —  {description}"
+            )
+            button.setMinimumHeight(55)
+            button.clicked.connect(
+                lambda checked=False, i=index:
+                    self.admin_tabs.setCurrentIndex(i)
+            )
+            layout.addWidget(button)
+
+        layout.addStretch()
+        return page
+
+
     def logic_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
