@@ -1,24 +1,25 @@
 
 import gc
-import os
+import shutil
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
-
 
 APP_DATA = Path.home() / ".langan"
 MODEL_DIR = APP_DATA / "models"
+OLLAMA_BLOBS = Path.home() / ".ollama" / "models" / "blobs"
+
+APP_DATA.mkdir(parents=True, exist_ok=True)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 MODELS = {
     "logic": {
-        "repo": "tensorblock/SmolLM2-360M-Instruct-GGUF",
+        "source": "sha256-c524b6c7dd36a91c5930ebc4dfee07858a1e424ee9fcb3c9ee3ddc89b23714f5",
         "file": "SmolLM2-360M-Instruct-Q5_0.gguf",
         "context": 2048,
     },
     "planning": {
-        "repo": "tensorblock/Qwen2.5-0.5B-Instruct-GGUF",
+        "source": "sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
         "file": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
         "context": 2048,
     },
@@ -30,17 +31,37 @@ class LanganAI:
         self.model = None
         self.active_role = None
 
-    def download_model(self, role):
+    def get_model_path(self, role):
         if role not in MODELS:
-            raise ValueError("Unknown model role: " + role)
+            raise ValueError(f"Unknown model role: {role}")
 
         settings = MODELS[role]
+        destination = MODEL_DIR / settings["file"]
+        source = OLLAMA_BLOBS / settings["source"]
 
-        return hf_hub_download(
-            repo_id=settings["repo"],
-            filename=settings["file"],
-            local_dir=str(MODEL_DIR),
-        )
+        if destination.exists():
+            with destination.open("rb") as f:
+                if f.read(4) == b"GGUF":
+                    return str(destination)
+
+            destination.unlink()
+
+        if not source.exists():
+            raise FileNotFoundError(
+                f"Model file not found: {source}\n"
+                "Make sure Ollama and the model are installed "
+                "for this Windows user."
+            )
+
+        with source.open("rb") as f:
+            if f.read(4) != b"GGUF":
+                raise ValueError(
+                    f"The source file is not a valid GGUF model: {source}"
+                )
+
+        shutil.copy2(source, destination)
+
+        return str(destination)
 
     def load_model(self, role):
         if self.active_role == role and self.model is not None:
@@ -49,7 +70,7 @@ class LanganAI:
         self.unload_model()
 
         settings = MODELS[role]
-        model_path = self.download_model(role)
+        model_path = self.get_model_path(role)
 
         self.model = Llama(
             model_path=model_path,
