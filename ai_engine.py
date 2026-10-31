@@ -2,7 +2,6 @@
 import gc
 import json
 import re
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -13,8 +12,9 @@ APP_DATA = Path.home() / ".langan"
 MODEL_DIR = APP_DATA / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-# The local Ollama model blobs you already have.
-# Langan can also use copies placed in ~/.langan/models.
+
+# Smol is exclusively the Logic Engine.
+# Qwen handles all planning, research and explanations.
 LOCAL_MODELS = {
     "logic": {
         "filename": "smol.gguf",
@@ -41,21 +41,33 @@ LOCAL_MODELS = {
 }
 
 
+ALLOWED_VERDICTS = (
+    "VALID",
+    "INVALID",
+    "CONDITIONAL",
+    "INSUFFICIENT",
+    "CONTRADICTORY",
+)
+
+
 class LanganAI:
+
     def __init__(self):
         self.model = None
         self.active_role = None
 
+    # --------------------------------------------------
+    # MODEL MANAGEMENT
+    # --------------------------------------------------
+
     def model_path(self, role):
         settings = LOCAL_MODELS[role]
 
-        # Preferred location for standalone Langan models.
         local_copy = MODEL_DIR / settings["filename"]
 
         if local_copy.exists():
             return local_copy
 
-        # Development fallback: use the existing Ollama model file.
         ollama_file = settings["ollama_blob"]
 
         if ollama_file.exists():
@@ -69,22 +81,29 @@ class LanganAI:
 
     def unload_model(self):
         if self.model is not None:
-            self.model.close()
-            self.model = None
-            self.active_role = None
-            gc.collect()
+            try:
+                self.model.close()
+            finally:
+                self.model = None
+                self.active_role = None
+                gc.collect()
 
     def load_model(self, role):
         if role not in LOCAL_MODELS:
-            raise ValueError(f"Unknown model role: {role}")
+            raise ValueError(
+                f"Unknown model role: {role}"
+            )
 
-        if self.active_role == role and self.model is not None:
+        if (
+            self.active_role == role
+            and self.model is not None
+        ):
             return
 
         self.unload_model()
 
-        path = self.model_path(role)
         settings = LOCAL_MODELS[role]
+        path = self.model_path(role)
 
         self.model = Llama(
             model_path=str(path),
@@ -118,15 +137,22 @@ class LanganAI:
                 },
             ],
             max_tokens=max_tokens,
-            temperature=0.3,
+            temperature=0.2,
         )
 
         return (
             result["choices"][0]["message"]["content"].strip()
         )
 
+    # --------------------------------------------------
+    # QWEN WEB ENGINE
+    # --------------------------------------------------
+
     def search_web(self, query, config):
-        api_key = config.get("tavily_key", "").strip()
+        api_key = config.get(
+            "tavily_key",
+            "",
+        ).strip()
 
         if not api_key:
             return "No Tavily API key is configured."
@@ -153,6 +179,7 @@ class LanganAI:
                 request,
                 timeout=25,
             ) as response:
+
                 data = json.loads(
                     response.read().decode("utf-8")
                 )
@@ -160,25 +187,33 @@ class LanganAI:
             results = []
 
             answer = data.get("answer")
+
             if answer:
                 results.append(
                     "SEARCH SUMMARY:\n" + answer
                 )
 
             for item in data.get("results", []):
+
                 results.append(
                     "TITLE: " + item.get("title", "")
                     + "\nURL: " + item.get("url", "")
                     + "\nCONTENT: " + item.get("content", "")
                 )
 
-            return "\n\n".join(results) or "No useful results found."
+            return (
+                "\n\n".join(results)
+                or "No useful results found."
+            )
 
         except Exception as error:
             return f"Web search failed: {error}"
 
     def fetch_website(self, url):
-        if not url.startswith(("http://", "https://")):
+
+        if not url.startswith(
+            ("http://", "https://")
+        ):
             return "The configured website URL is invalid."
 
         request = urllib.request.Request(
@@ -193,20 +228,32 @@ class LanganAI:
                 request,
                 timeout=15,
             ) as response:
-                content = response.read(30000).decode(
+
+                content = response.read(
+                    30000
+                ).decode(
                     "utf-8",
                     errors="replace",
                 )
 
-            # Basic removal of HTML tags.
             content = re.sub(
                 r"<script.*?</script>|<style.*?</style>",
                 " ",
                 content,
                 flags=re.I | re.S,
             )
-            content = re.sub(r"<[^>]+>", " ", content)
-            content = re.sub(r"\s+", " ", content)
+
+            content = re.sub(
+                r"<[^>]+>",
+                " ",
+                content,
+            )
+
+            content = re.sub(
+                r"\s+",
+                " ",
+                content,
+            )
 
             return content[:12000]
 
@@ -214,18 +261,35 @@ class LanganAI:
             return f"Website retrieval failed: {error}"
 
     def research(self, request_text, config):
-        method = config.get("web_engine", "Tavily")
+
+        method = config.get(
+            "web_engine",
+            "Tavily",
+        )
 
         if method == "Website URL":
-            url = config.get("website_url", "").strip()
+
+            url = config.get(
+                "website_url",
+                "",
+            ).strip()
+
             if url:
                 return self.fetch_website(url)
 
             return "No website URL has been configured."
 
-        return self.search_web(request_text, config)
+        return self.search_web(
+            request_text,
+            config,
+        )
+
+    # --------------------------------------------------
+    # LOGIC ENGINE RESPONSE HANDLING
+    # --------------------------------------------------
 
     def extract_action(self, text):
+
         match = re.search(
             r"ENGINE_ACTION\s*:\s*([A-Z_]+)",
             text.upper(),
@@ -236,12 +300,56 @@ class LanganAI:
 
         return ""
 
-    def explain_result(self, question, verdict, config):
+    def extract_verdict(self, text):
+
+        pattern = (
+            r"\b(?:FINAL\s+)?VERDICT\s*:\s*"
+            r"(VALID|INVALID|CONDITIONAL|"
+            r"INSUFFICIENT|CONTRADICTORY)\b"
+        )
+
+        match = re.search(
+            pattern,
+            text.upper(),
+        )
+
+        if match:
+            return match.group(1)
+
+        # A missing verdict must never be assumed VALID.
+        return "INSUFFICIENT"
+
+    # --------------------------------------------------
+    # QWEN FINAL EXPLANATION
+    # --------------------------------------------------
+
+    def explain_result(
+        self,
+        question,
+        verdict_text,
+        config,
+    ):
+
+        verdict = self.extract_verdict(
+            verdict_text
+        )
+
         system_prompt = (
-            "You are Langan, the explanation and communication "
-            "assistant. Explain the Logic Engine's result clearly. "
-            "Preserve its verdict. Do not change its conclusion, "
-            "invent evidence, or present assumptions as facts."
+            "You are Langan's explanation assistant, "
+            "powered by Qwen.\n\n"
+            "Your only responsibility is to explain "
+            "the Logic Engine's result.\n\n"
+            "You MUST preserve the exact verdict supplied "
+            "by Smol.\n\n"
+            "You are NOT allowed to:\n"
+            "- Make a new logical decision.\n"
+            "- Change the verdict.\n"
+            "- Upgrade or downgrade the verdict.\n"
+            "- Reverse the conclusion.\n"
+            "- Invent supporting evidence.\n"
+            "- Present assumptions as established facts.\n\n"
+            "If the reasoning is unclear, explain that "
+            "the reasoning is unclear."
         )
 
         evidence_prompt = config.get(
@@ -251,18 +359,32 @@ class LanganAI:
 
         user_message = (
             f"ORIGINAL QUESTION:\n{question}\n\n"
-            f"LOGIC ENGINE RESULT:\n{verdict}\n\n"
+            f"SMOL'S COMPLETE RESPONSE:\n{verdict_text}\n\n"
+            f"LOCKED SMOL VERDICT: {verdict}\n\n"
             f"EXPLANATION GUIDANCE:\n{evidence_prompt}\n\n"
-            "Explain the result in clear, natural language. "
-            "Mention important uncertainties and limitations."
+            "Explain Smol's reasoning in clear language. "
+            "Preserve the locked verdict exactly. "
+            "Mention uncertainty and limitations. "
+            "Do not introduce a new logical conclusion."
         )
 
-        return self.ask_model(
+        explanation = self.ask_model(
             "planning",
             system_prompt,
             user_message,
             max_tokens=512,
         )
+
+        # The displayed verdict comes from Smol,
+        # not from Qwen's generated explanation.
+        return (
+            f"LANGAN VERDICT: {verdict}\n\n"
+            f"{explanation}"
+        )
+
+    # --------------------------------------------------
+    # MAIN QWEN / SMOL WORKFLOW
+    # --------------------------------------------------
 
     def generate_conversation(
         self,
@@ -270,141 +392,230 @@ class LanganAI:
         config,
         progress_callback=None,
     ):
+
         def report(message):
             if progress_callback:
                 progress_callback(message)
 
-        # STAGE 1: Qwen prepares the problem.
-        report("Qwen is preparing the problem...")
+        try:
 
-        planning_prompt = (
-            "You are the Langan Planning Engine powered by Qwen. "
-            "Prepare the user's problem for independent logical "
-            "evaluation by Smol.\n\n"
-            "Follow these instructions:\n"
-            + config.get("premise_prompt", "")
-            + "\n\nSeparate facts, definitions, assumptions, "
-            "unknowns, and proposed conclusions. Do not invent "
-            "facts or pretend you have verified information. "
-            "Identify information that may need research. "
-            "Return a structured problem submission."
-        )
-
-        plan = self.ask_model(
-            "planning",
-            planning_prompt,
-            question,
-            max_tokens=512,
-        )
-
-        # STAGE 2: Smol evaluates the premises.
-        report("Smol is evaluating the premises...")
-
-        logic_prompt = config.get("logic_prompt", "").strip()
-
-        if not logic_prompt:
-            logic_prompt = (
-                "You are Langan's Logic Engine. Evaluate the "
-                "premises carefully. Identify missing information, "
-                "invalid inferences, contradictions, and uncertainty. "
-                "Never invent facts. If more information is needed, "
-                "return ENGINE_ACTION: REQUEST_PREMISES. "
-                "Otherwise return ENGINE_ACTION: FINAL_RESULT "
-                "and a verdict: VALID, INVALID, CONDITIONAL, "
-                "INSUFFICIENT, or CONTRADICTORY."
-            )
-
-        evaluation = self.ask_model(
-            "logic",
-            logic_prompt,
-            (
-                f"ORIGINAL QUESTION:\n{question}\n\n"
-                f"QWEN PROBLEM SUBMISSION:\n{plan}\n\n"
-                "Evaluate this submission. Return a clear verdict "
-                "or request specific missing information."
-            ),
-            max_tokens=512,
-        )
-
-        # STAGE 3: Allow a limited research and re-evaluation cycle.
-        max_research_rounds = 2
-
-        for round_number in range(max_research_rounds):
-            action = self.extract_action(evaluation)
-
-            if action != "REQUEST_PREMISES":
-                break
+            # STAGE 1
+            # QWEN PREPARES THE PROBLEM.
 
             report(
-                f"Qwen is researching missing information "
-                f"(round {round_number + 1})..."
+                "Qwen is preparing the problem..."
             )
 
-            research_results = self.research(
-                evaluation,
-                config,
+            planning_prompt = (
+                "You are the Langan Planning Engine "
+                "powered by Qwen.\n\n"
+                "Prepare the user's problem for "
+                "independent evaluation by Smol.\n\n"
+                "Follow these instructions:\n"
+                + config.get(
+                    "premise_prompt",
+                    "",
+                )
+                + "\n\n"
+                "Separate facts, definitions, assumptions, "
+                "unknowns, and proposed conclusions.\n"
+                "Do not invent facts.\n"
+                "Do not claim that information is verified "
+                "unless reliable evidence supports that claim.\n"
+                "Identify information that may need research.\n"
+                "Return a structured problem submission."
             )
 
-            report("Smol is checking the new information...")
-
-            # Release Smol before Qwen is loaded again.
-            self.unload_model()
-
-            followup_prompt = (
-                "You are the Langan Planning Engine. The Logic "
-                "Engine has requested additional information. "
-                "Review the request and the research results. "
-                "Separate sourced information from assumptions. "
-                "Do not claim that a source proves something it "
-                "does not establish. Return an updated problem "
-                "submission for the Logic Engine."
-            )
-
-            updated_plan = self.ask_model(
+            plan = self.ask_model(
                 "planning",
-                followup_prompt,
-                (
-                    f"ORIGINAL QUESTION:\n{question}\n\n"
-                    f"PREVIOUS PLAN:\n{plan}\n\n"
-                    f"LOGIC ENGINE REQUEST:\n{evaluation}\n\n"
-                    f"RESEARCH RESULTS:\n{research_results}"
-                ),
+                planning_prompt,
+                question,
                 max_tokens=512,
             )
 
-            report("Smol is re-evaluating the updated premises...")
+            # STAGE 2
+            # SMOL APPLIES THE LOGIC RULES.
 
-            self.unload_model()
+            report(
+                "Smol is evaluating the premises..."
+            )
+
+            logic_prompt = config.get(
+                "logic_prompt",
+                "",
+            ).strip()
+
+            if not logic_prompt:
+
+                logic_prompt = (
+                    "You are Langan's Logic Engine, "
+                    "powered by Smol.\n\n"
+                    "Your responsibility is logical "
+                    "evaluation only.\n\n"
+                    "Evaluate the premises carefully.\n"
+                    "Identify missing information, invalid "
+                    "inferences, contradictions, and uncertainty.\n"
+                    "Never invent facts.\n"
+                    "Never allow Qwen to decide your verdict.\n\n"
+                    "If more information is needed, return:\n"
+                    "ENGINE_ACTION: REQUEST_PREMISES\n\n"
+                    "Otherwise return:\n"
+                    "ENGINE_ACTION: FINAL_RESULT\n"
+                    "VERDICT: VALID, INVALID, CONDITIONAL, "
+                    "INSUFFICIENT, or CONTRADICTORY."
+                )
 
             evaluation = self.ask_model(
                 "logic",
                 logic_prompt,
                 (
                     f"ORIGINAL QUESTION:\n{question}\n\n"
-                    f"UPDATED QWEN SUBMISSION:\n{updated_plan}\n\n"
-                    f"PREVIOUS LOGIC ENGINE RESPONSE:\n{evaluation}\n\n"
-                    "Re-evaluate the problem. Return a final verdict "
-                    "or request more information."
+                    f"QWEN PROBLEM SUBMISSION:\n{plan}\n\n"
+                    "Apply your logic rules to the submission. "
+                    "Return a verdict or request specific "
+                    "missing premises."
                 ),
                 max_tokens=512,
             )
 
-            plan = updated_plan
+            # STAGE 3
+            # QWEN RESEARCHES.
+            # SMOL RE-EVALUATES.
+            # MAXIMUM TWO RESEARCH ROUNDS.
 
-        # STAGE 4: Qwen explains Smol's result.
-        report("Qwen is preparing the final explanation...")
+            max_research_rounds = 2
 
-        self.unload_model()
+            final_evaluation_reached = False
 
-        final_answer = self.explain_result(
-            question,
-            evaluation,
-            config,
-        )
+            for round_number in range(
+                max_research_rounds
+            ):
 
-        self.unload_model()
+                action = self.extract_action(
+                    evaluation
+                )
 
-        return final_answer
+                if action != "REQUEST_PREMISES":
+                    final_evaluation_reached = True
+                    break
+
+                report(
+                    f"Qwen is researching missing "
+                    f"information (round "
+                    f"{round_number + 1})..."
+                )
+
+                research_results = self.research(
+                    evaluation,
+                    config,
+                )
+
+                # Smol is unloaded before Qwen is loaded.
+                self.unload_model()
+
+                report(
+                    "Qwen is preparing updated premises..."
+                )
+
+                followup_prompt = (
+                    "You are Langan's Planning Engine.\n\n"
+                    "The Logic Engine has requested "
+                    "additional information.\n\n"
+                    "Review the request and research material.\n"
+                    "Separate sourced statements, assumptions, "
+                    "and unresolved questions.\n"
+                    "Research material may be incomplete, "
+                    "inaccurate, or irrelevant.\n"
+                    "Do not treat it as automatically true.\n"
+                    "Do not invent sources or facts.\n"
+                    "Do not make the logical decision.\n"
+                    "Return an updated problem submission "
+                    "for Smol."
+                )
+
+                updated_plan = self.ask_model(
+                    "planning",
+                    followup_prompt,
+                    (
+                        f"ORIGINAL QUESTION:\n{question}\n\n"
+                        f"PREVIOUS PLAN:\n{plan}\n\n"
+                        f"SMOL'S REQUEST:\n{evaluation}\n\n"
+                        f"UNVERIFIED RESEARCH MATERIAL:\n"
+                        f"{research_results}"
+                    ),
+                    max_tokens=512,
+                )
+
+                # Qwen is unloaded before Smol is loaded.
+                self.unload_model()
+
+                report(
+                    "Smol is re-evaluating the premises..."
+                )
+
+                evaluation = self.ask_model(
+                    "logic",
+                    logic_prompt,
+                    (
+                        f"ORIGINAL QUESTION:\n{question}\n\n"
+                        f"UPDATED QWEN SUBMISSION:\n"
+                        f"{updated_plan}\n\n"
+                        f"PREVIOUS LOGIC RESPONSE:\n"
+                        f"{evaluation}\n\n"
+                        "Independently apply your logic rules "
+                        "to the updated premises. Do not accept "
+                        "claims merely because Qwen included them. "
+                        "Return a final verdict or request "
+                        "additional premises."
+                    ),
+                    max_tokens=512,
+                )
+
+                plan = updated_plan
+
+            # If Smol still requests information after
+            # the allowed research rounds, report INSUFFICIENT.
+
+            if not final_evaluation_reached:
+
+                if (
+                    self.extract_action(evaluation)
+                    == "REQUEST_PREMISES"
+                ):
+
+                    evaluation = (
+                        "ENGINE_ACTION: FINAL_RESULT\n"
+                        "VERDICT: INSUFFICIENT\n\n"
+                        "The Logic Engine still requires "
+                        "additional information after the "
+                        "permitted research rounds.\n"
+                        "A reliable determination cannot "
+                        "yet be made.\n\n"
+                        "Last Logic Engine response:\n"
+                        + evaluation
+                    )
+
+            # STAGE 4
+            # QWEN EXPLAINS SMOL'S VERDICT.
+            # QWEN DOES NOT MAKE A NEW DECISION.
+
+            report(
+                "Qwen is preparing the final explanation..."
+            )
+
+            self.unload_model()
+
+            final_answer = self.explain_result(
+                question,
+                evaluation,
+                config,
+            )
+
+            return final_answer
+
+        finally:
+            # Always release model memory.
+            self.unload_model()
 
     def close(self):
         self.unload_model()
