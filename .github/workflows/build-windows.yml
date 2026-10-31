@@ -1,5 +1,5 @@
 
-name: Build Langan for Windows
+name: Build Langan for Older Intel CPUs
 
 on:
   workflow_dispatch:
@@ -22,14 +22,16 @@ jobs:
           architecture: "x64"
 
       - name: Install dependencies
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF"
         run: |
           python -m pip install --upgrade pip
-          pip install --prefer-binary -r requirements.txt
+          pip install --no-binary=llama-cpp-python -r requirements.txt
           pip install pyinstaller
 
-      - name: Check AI engine imports
+      - name: Check AI engine
         run: |
-          python -c "from llama_cpp import Llama; from huggingface_hub import hf_hub_download; print('AI dependencies imported successfully')"
+          python -c "from llama_cpp import Llama; print('Compatible AI engine installed')"
 
       - name: Build Langan
         run: |
@@ -38,6 +40,6 @@ jobs:
       - name: Upload Windows executable
         uses: actions/upload-artifact@v4
         with:
-          name: Langan-Windows
+          name: Langan-Windows-AVX
           path: dist/Langan.exe
           retention-days: 30
