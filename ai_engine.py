@@ -25,7 +25,7 @@ DEFAULT_MODEL_FILES = {
             / "blobs"
             / "sha256-c524b6c7dd36a91c5930ebc4dfee07858a1e424ee9fcb3c9ee3ddc89b23714f5"
         ),
-        "context": 2048,
+        "context": 4096,
         "config_key": "smol_model",
     },
     "planning": {
@@ -38,7 +38,7 @@ DEFAULT_MODEL_FILES = {
             / "blobs"
             / "sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515"
         ),
-        "context": 2048,
+        "context": 4096,
         "config_key": "planning_model",
     },
 }
@@ -73,8 +73,6 @@ class LanganAI:
             config.get(settings["config_key"], settings["label"])
         ).strip()
 
-        # Accept the friendly default label, the default GGUF filename,
-        # a custom filename in .langan/models, or an absolute file path.
         default_names = {
             settings["label"].casefold(),
             settings["filename"].casefold(),
@@ -125,9 +123,8 @@ class LanganAI:
         if role not in DEFAULT_MODEL_FILES:
             raise ValueError(f"Unknown model role: {role}")
 
-        # A role can have a different configured path after Admin settings
-        # are changed, so compare the selected path as well as the role.
         path = self.configured_model_path(role, config)
+
         if (
             self.active_role == role
             and self.model is not None
@@ -141,11 +138,12 @@ class LanganAI:
         self.model = Llama(
             model_path=str(path),
             n_ctx=settings["context"],
-            n_threads=2,
+            n_threads=4,
             n_batch=64,
             use_mmap=True,
             verbose=False,
         )
+
         self.active_role = role
         self.active_model_path = str(path)
 
@@ -154,7 +152,7 @@ class LanganAI:
         role,
         system_prompt,
         user_message,
-        max_tokens=512,
+        max_tokens=256,
         config=None,
     ):
         self.load_model(role, config)
@@ -168,9 +166,7 @@ class LanganAI:
             temperature=0.2,
         )
 
-        return (
-            result["choices"][0]["message"]["content"].strip()
-        )
+        return result["choices"][0]["message"]["content"].strip()
 
     # --------------------------------------------------
     # QWEN WEB ENGINE
@@ -178,6 +174,7 @@ class LanganAI:
 
     def search_web(self, query, config):
         api_key = config.get("tavily_key", "").strip()
+
         if not api_key:
             return "No Tavily API key is configured."
 
@@ -202,6 +199,7 @@ class LanganAI:
 
             results = []
             answer = data.get("answer")
+
             if answer:
                 results.append("SEARCH SUMMARY:\n" + answer)
 
@@ -219,6 +217,7 @@ class LanganAI:
 
     def fetch_website(self, url):
         parsed = urlparse(url)
+
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             return "The configured website URL is invalid."
 
@@ -239,8 +238,10 @@ class LanganAI:
                 content,
                 flags=re.I | re.S,
             )
+
             content = re.sub(r"<[^>]+>", " ", content)
             content = re.sub(r"\s+", " ", content)
+
             return content[:12000]
 
         except Exception as error:
@@ -248,10 +249,13 @@ class LanganAI:
 
     def research(self, request_text, config):
         method = config.get("web_engine", "Tavily")
+
         if method == "Website URL":
             url = config.get("website_url", "").strip()
+
             if url:
                 return self.fetch_website(url)
+
             return "No website URL has been configured."
 
         return self.search_web(request_text, config)
@@ -265,6 +269,7 @@ class LanganAI:
             r"ENGINE_ACTION\s*:\s*([A-Z_]+)",
             text.upper(),
         )
+
         return match.group(1) if match else ""
 
     def extract_verdict(self, text):
@@ -273,11 +278,12 @@ class LanganAI:
             r"(VALID|INVALID|CONDITIONAL|"
             r"INSUFFICIENT|CONTRADICTORY)\b"
         )
+
         match = re.search(pattern, text.upper())
+
         if match:
             return match.group(1)
 
-        # A missing or unrecognized verdict is never assumed VALID.
         return "INSUFFICIENT"
 
     # --------------------------------------------------
@@ -298,6 +304,7 @@ class LanganAI:
         )
 
         evidence_prompt = config.get("evidence_prompt", "")
+
         user_message = (
             f"ORIGINAL QUESTION:\n{question}\n\n"
             f"SMOL'S COMPLETE RESPONSE:\n{verdict_text}\n\n"
@@ -312,7 +319,7 @@ class LanganAI:
             "planning",
             system_prompt,
             user_message,
-            max_tokens=512,
+            max_tokens=160,
             config=config,
         )
 
@@ -335,9 +342,8 @@ class LanganAI:
             if progress_callback:
                 progress_callback(message)
 
-        # This wrapper preserves the administrator's rules while
-        # consistently specifying the response protocol Smol must use.
         administrator_rules = config.get("logic_prompt", "").strip()
+
         logic_prompt = (
             "You are Langan's Logic Engine, powered by Smol.\n\n"
             "Apply the administrator's Logic Engine rules below. "
@@ -367,6 +373,7 @@ class LanganAI:
         try:
             # STAGE 1: QWEN PREPARES THE PROBLEM.
             report("Qwen is preparing the problem...")
+
             planning_prompt = (
                 "You are the Langan Planning Engine powered by Qwen.\n\n"
                 "Prepare the user's problem for independent evaluation "
@@ -381,12 +388,16 @@ class LanganAI:
             )
 
             plan = self.ask_model(
-                "planning", planning_prompt, question,
-                max_tokens=512, config=config,
+                "planning",
+                planning_prompt,
+                question,
+                max_tokens=160,
+                config=config,
             )
 
             # STAGE 2: SMOL EVALUATES.
             report("Smol is evaluating the premises...")
+
             evaluation = self.ask_model(
                 "logic",
                 logic_prompt,
@@ -396,15 +407,16 @@ class LanganAI:
                     "Apply your logic rules. Return a verdict or "
                     "request specific missing premises."
                 ),
-                max_tokens=512,
+                max_tokens=192,
                 config=config,
             )
 
-            # STAGE 3: UP TO TWO RESEARCH ROUNDS.
+            # STAGE 3: ONE RESEARCH ROUND IF REQUIRED.
             final_evaluation_reached = False
-            max_research_rounds = 2
+            max_research_rounds = 1
 
             for round_number in range(max_research_rounds):
+
                 if self.extract_action(evaluation) != "REQUEST_PREMISES":
                     final_evaluation_reached = True
                     break
@@ -413,9 +425,11 @@ class LanganAI:
                     f"Qwen is researching missing information "
                     f"(round {round_number + 1})..."
                 )
+
                 research_results = self.research(evaluation, config)
 
                 self.unload_model()
+
                 report("Qwen is preparing updated premises...")
 
                 followup_prompt = (
@@ -438,14 +452,16 @@ class LanganAI:
                         f"SMOL'S REQUEST:\n{evaluation}\n\n"
                         f"UNVERIFIED RESEARCH MATERIAL:\n{research_results}"
                     ),
-                    max_tokens=512,
+                    max_tokens=160,
                     config=config,
                 )
 
                 self.unload_model()
+
                 report("Smol is re-evaluating the premises...")
 
                 previous_evaluation = evaluation
+
                 evaluation = self.ask_model(
                     "logic",
                     logic_prompt,
@@ -459,13 +475,14 @@ class LanganAI:
                         "because Qwen included them. Return a final "
                         "verdict or request additional premises."
                     ),
-                    max_tokens=512,
+                    max_tokens=192,
                     config=config,
                 )
+
                 plan = updated_plan
 
-            # If Smol still requests premises after two rounds,
-            # the system reports INSUFFICIENT rather than guessing.
+            # If Smol still requests premises after the research round,
+            # report INSUFFICIENT rather than guessing.
             if (
                 not final_evaluation_reached
                 and self.extract_action(evaluation) == "REQUEST_PREMISES"
@@ -474,7 +491,7 @@ class LanganAI:
                     "ENGINE_ACTION: FINAL_RESULT\n"
                     "VERDICT: INSUFFICIENT\n\n"
                     "The Logic Engine still requires additional "
-                    "information after the permitted research rounds. "
+                    "information after the permitted research round. "
                     "A reliable determination cannot yet be made.\n\n"
                     "Last Logic Engine response:\n"
                     + evaluation
@@ -482,6 +499,7 @@ class LanganAI:
 
             # A missing verdict is also safely converted to INSUFFICIENT.
             verdict = self.extract_verdict(evaluation)
+
             if verdict == "INSUFFICIENT" and not re.search(
                 r"\bVERDICT\s*:\s*INSUFFICIENT\b",
                 evaluation,
@@ -495,9 +513,11 @@ class LanganAI:
                     + evaluation
                 )
 
-            # STAGE 4: QWEN EXPLAINS, WITHOUT OWNING THE VERDICT.
+            # STAGE 4: QWEN EXPLAINS WITHOUT OWNING THE VERDICT.
             report("Qwen is preparing the final explanation...")
+
             self.unload_model()
+
             return self.explain_result(question, evaluation, config)
 
         finally:
