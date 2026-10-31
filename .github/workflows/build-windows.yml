@@ -19,15 +19,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          architecture: "x64"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install --prefer-binary -r requirements.txt
+          pip install pyinstaller
+
+      - name: Check AI engine imports
+        run: |
+          python -c "from llama_cpp import Llama; from huggingface_hub import hf_hub_download; print('AI dependencies imported successfully')"
 
       - name: Build Langan
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name Langan app.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name Langan --collect-all llama_cpp --collect-all huggingface_hub --hidden-import=llama_cpp --hidden-import=huggingface_hub app.py
 
       - name: Upload Windows executable
         uses: actions/upload-artifact@v4
