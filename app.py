@@ -2,20 +2,23 @@
 import sys
 import os
 import json
+import html
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QTextEdit, QStackedWidget, QFrame, QMessageBox,
-    QDialog, QFormLayout, QComboBox, QScrollArea
+    QDialog, QComboBox
 )
+
+from ai_engine import LanganAI
 
 
 APP_NAME = "Langan"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 DATA_DIR = Path.home() / ".langan"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,25 +33,42 @@ MUTED = "#71847A"
 
 
 def load_config():
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    return {
-        "smol_model": "",
-        "logic_prompt": "Follow logical reasoning. Prioritize accuracy and explain conclusions clearly.",
-        "planning_model": "",
-        "premise_prompt": "Generate 60 clear, logically structured premises.",
+    defaults = {
+        "smol_model": "SmolLM2-360M-Instruct-Q5_0",
+        "logic_prompt": (
+            "You are Langan's logic engine. "
+            "Think carefully, prioritize accuracy, "
+            "explain conclusions clearly and do not "
+            "invent facts."
+        ),
+        "planning_model": "Qwen2.5-0.5B-Instruct-Q4_K_M",
+        "premise_prompt": (
+            "Generate 60 clear, logically structured premises."
+        ),
         "web_engine": "Tavily",
         "tavily_key": "",
         "website_url": "",
-        "evidence_prompt": "Check whether an analogy is structurally valid. Identify similarities, differences and supporting evidence."
+        "evidence_prompt": (
+            "Check whether an analogy is structurally valid. "
+            "Identify similarities, differences and evidence."
+        )
     }
+
+    if CONFIG_FILE.exists():
+        try:
+            saved = json.loads(
+                CONFIG_FILE.read_text(encoding="utf-8")
+            )
+            defaults.update(saved)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return defaults
 
 
 def save_config(config):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
     CONFIG_FILE.write_text(
         json.dumps(config, indent=4),
         encoding="utf-8"
@@ -58,6 +78,7 @@ def save_config(config):
 class AdminLogin(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+
         self.setWindowTitle("Langan - Admin Access")
         self.setFixedSize(380, 230)
 
@@ -78,7 +99,9 @@ class AdminLogin(QDialog):
 
         self.password = QLineEdit()
         self.password.setPlaceholderText("Admin password")
-        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setEchoMode(
+            QLineEdit.EchoMode.Password
+        )
         layout.addWidget(self.password)
 
         unlock = QPushButton("Unlock Admin Mode")
@@ -103,19 +126,54 @@ class AdminLogin(QDialog):
             )
 
 
+class ChatWorker(QThread):
+    response_ready = Signal(str)
+    error_occurred = Signal(str)
+
+    def __init__(self, ai, message, system_prompt):
+        super().__init__()
+
+        self.ai = ai
+        self.message = message
+        self.system_prompt = system_prompt
+
+    def run(self):
+        try:
+            response = self.ai.generate(
+                self.message,
+                role="logic",
+                system_prompt=self.system_prompt
+            )
+
+            self.response_ready.emit(response)
+
+        except Exception as error:
+            self.error_occurred.emit(str(error))
+
+
 class LanganWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle(f"{APP_NAME} - AI Assistant")
+        self.setWindowTitle(
+            f"{APP_NAME} - AI Assistant"
+        )
+
         self.resize(1200, 760)
         self.setMinimumSize(900, 600)
 
         self.config = load_config()
         self.admin_mode = False
 
+        self.ai = LanganAI()
+        self.chat_worker = None
+
         self.build_interface()
         self.apply_theme()
+
+    # -----------------------------------------
+    # MAIN INTERFACE
+    # -----------------------------------------
 
     def build_interface(self):
         central = QWidget()
@@ -125,7 +183,6 @@ class LanganWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Sidebar
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(220)
@@ -154,28 +211,33 @@ class LanganWindow(QMainWindow):
             self.settings_button
         ):
             button.setObjectName("nav")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setCursor(
+                Qt.CursorShape.PointingHandCursor
+            )
             side_layout.addWidget(button)
 
         self.chat_button.clicked.connect(
             lambda: self.show_page(0)
         )
+
         self.history_button.clicked.connect(
             lambda: self.show_page(1)
         )
+
         self.settings_button.clicked.connect(
             self.open_settings
         )
 
         side_layout.addStretch()
 
-        version = QLabel(f"LANGAN v{APP_VERSION}")
+        version = QLabel(
+            f"LANGAN v{APP_VERSION}"
+        )
         version.setObjectName("muted")
         side_layout.addWidget(version)
 
         main_layout.addWidget(sidebar)
 
-        # Main content
         self.pages = QStackedWidget()
         main_layout.addWidget(self.pages, 1)
 
@@ -187,8 +249,13 @@ class LanganWindow(QMainWindow):
     def show_page(self, index):
         self.pages.setCurrentIndex(index)
 
+    # -----------------------------------------
+    # CHAT PAGE
+    # -----------------------------------------
+
     def create_chat_page(self):
         page = QWidget()
+
         layout = QVBoxLayout(page)
         layout.setContentsMargins(45, 35, 45, 25)
 
@@ -200,16 +267,16 @@ class LanganWindow(QMainWindow):
 
         header.addStretch()
 
-        status = QLabel("● Online")
+        status = QLabel("● AI Ready")
         status.setObjectName("status")
         header.addWidget(status)
 
         layout.addLayout(header)
 
-        layout.addStretch()
-
         welcome = QLabel("Welcome to Langan")
-        welcome.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        welcome.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
         welcome.setObjectName("welcome")
         layout.addWidget(welcome)
 
@@ -217,11 +284,14 @@ class LanganWindow(QMainWindow):
             "Think deeper. Find better answers.\n"
             "Ask questions, explore ideas and examine evidence."
         )
-        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        description.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
         description.setObjectName("muted")
         layout.addWidget(description)
 
-        layout.addSpacing(30)
+        layout.addSpacing(20)
 
         self.chat_display = QTextEdit()
         self.chat_display.setReadOnly(True)
@@ -229,6 +299,7 @@ class LanganWindow(QMainWindow):
         self.chat_display.setPlaceholderText(
             "Your conversation will appear here."
         )
+
         layout.addWidget(self.chat_display, 1)
 
         input_row = QHBoxLayout()
@@ -237,14 +308,19 @@ class LanganWindow(QMainWindow):
         self.message_input.setPlaceholderText(
             "Message Langan..."
         )
+
         self.message_input.returnPressed.connect(
             self.send_message
         )
+
         input_row.addWidget(self.message_input)
 
-        send = QPushButton("Send")
-        send.clicked.connect(self.send_message)
-        input_row.addWidget(send)
+        self.send_button = QPushButton("Send")
+        self.send_button.clicked.connect(
+            self.send_message
+        )
+
+        input_row.addWidget(self.send_button)
 
         layout.addLayout(input_row)
 
@@ -256,21 +332,89 @@ class LanganWindow(QMainWindow):
         if not message:
             return
 
-        self.chat_display.append(
-            f"<b style='color:{DARK_GREEN}'>You:</b> "
-            f"{message}"
-        )
+        if self.chat_worker is not None:
+            return
+
+        safe_message = html.escape(message)
 
         self.chat_display.append(
-            "<b style='color:#71847A'>Langan:</b> "
-            "The AI engine will be connected in the next "
-            "development stage."
+            f"<b style='color:{DARK_GREEN}'>You:</b> "
+            f"{safe_message}"
         )
 
         self.message_input.clear()
+        self.message_input.setEnabled(False)
+        self.send_button.setEnabled(False)
+
+        self.chat_display.append(
+            "<b style='color:#71847A'>Langan:</b> "
+            "Thinking..."
+        )
+
+        system_prompt = self.config.get(
+            "logic_prompt",
+            "You are Langan, a helpful AI assistant."
+        )
+
+        self.chat_worker = ChatWorker(
+            self.ai,
+            message,
+            system_prompt
+        )
+
+        self.chat_worker.response_ready.connect(
+            self.handle_ai_response
+        )
+
+        self.chat_worker.error_occurred.connect(
+            self.handle_ai_error
+        )
+
+        self.chat_worker.finished.connect(
+            self.chat_worker_finished
+        )
+
+        self.chat_worker.start()
+
+    def handle_ai_response(self, response):
+        safe_response = html.escape(response)
+        safe_response = safe_response.replace(
+            "\n", "<br>"
+        )
+
+        self.chat_display.append(
+            f"<b style='color:{DARK_GREEN}'>Langan:</b> "
+            f"{safe_response}"
+        )
+
+        self.chat_display.moveCursor(
+            self.chat_display.textCursor().MoveOperation.End
+        )
+
+    def handle_ai_error(self, error):
+        self.chat_display.append(
+            "<b style='color:#B00020'>Langan error:</b> "
+            f"{html.escape(error)}"
+        )
+
+    def chat_worker_finished(self):
+        worker = self.chat_worker
+        self.chat_worker = None
+
+        self.message_input.setEnabled(True)
+        self.send_button.setEnabled(True)
+        self.message_input.setFocus()
+
+        if worker is not None:
+            worker.deleteLater()
+
+    # -----------------------------------------
+    # HISTORY PAGE
+    # -----------------------------------------
 
     def create_history_page(self):
         page = QWidget()
+
         layout = QVBoxLayout(page)
 
         title = QLabel("Conversation History")
@@ -284,10 +428,16 @@ class LanganWindow(QMainWindow):
         layout.addWidget(info)
 
         layout.addStretch()
+
         return page
+
+    # -----------------------------------------
+    # SETTINGS PAGE
+    # -----------------------------------------
 
     def create_settings_page(self):
         page = QWidget()
+
         layout = QVBoxLayout(page)
         layout.setContentsMargins(40, 35, 40, 35)
 
@@ -308,11 +458,16 @@ class LanganWindow(QMainWindow):
         admin_button = QPushButton(
             "🔐  Enter Admin Mode"
         )
+
         admin_button.setMinimumHeight(55)
-        admin_button.clicked.connect(self.open_admin_login)
+        admin_button.clicked.connect(
+            self.open_admin_login
+        )
+
         layout.addWidget(admin_button)
 
         layout.addStretch()
+
         return page
 
     def open_settings(self):
@@ -325,8 +480,13 @@ class LanganWindow(QMainWindow):
             self.admin_mode = True
             self.show_page(3)
 
+    # -----------------------------------------
+    # ADMIN PAGE
+    # -----------------------------------------
+
     def create_admin_page(self):
         page = QWidget()
+
         layout = QVBoxLayout(page)
         layout.setContentsMargins(30, 25, 30, 25)
 
@@ -345,6 +505,7 @@ class LanganWindow(QMainWindow):
         layout.addLayout(heading)
 
         self.admin_tabs = QComboBox()
+
         self.admin_tabs.addItems([
             "Dashboard",
             "Logic",
@@ -353,23 +514,38 @@ class LanganWindow(QMainWindow):
             "Web Engine",
             "Evidence Prompt"
         ])
+
         self.admin_tabs.currentIndexChanged.connect(
             self.change_admin_tab
         )
+
         layout.addWidget(self.admin_tabs)
 
         self.admin_stack = QStackedWidget()
 
-        self.admin_stack.addWidget(self.admin_dashboard())
-        self.admin_stack.addWidget(self.logic_page())
-        self.admin_stack.addWidget(self.planning_page())
+        self.admin_stack.addWidget(
+            self.admin_dashboard()
+        )
+
+        self.admin_stack.addWidget(
+            self.logic_page()
+        )
+
+        self.admin_stack.addWidget(
+            self.planning_page()
+        )
+
         self.admin_stack.addWidget(
             self.prompt_page(
                 "Premise Generator",
                 "premise_prompt"
             )
         )
-        self.admin_stack.addWidget(self.web_page())
+
+        self.admin_stack.addWidget(
+            self.web_page()
+        )
+
         self.admin_stack.addWidget(
             self.prompt_page(
                 "Evidence Verification",
@@ -408,6 +584,7 @@ class LanganWindow(QMainWindow):
 
         subtitle = QLabel(description)
         subtitle.setObjectName("muted")
+        subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         return container
@@ -419,19 +596,18 @@ class LanganWindow(QMainWindow):
         heading = QLabel(label)
         layout.addWidget(heading)
 
-        row = QHBoxLayout()
-
         field = QLineEdit(current)
         field.setPlaceholderText(
             "Enter Hugging Face model name"
         )
-        row.addWidget(field)
 
-        layout.addLayout(row)
+        layout.addWidget(field)
+
         return container, field
 
     def admin_dashboard(self):
         page = QWidget()
+
         layout = QVBoxLayout(page)
         layout.setSpacing(16)
 
@@ -443,6 +619,7 @@ class LanganWindow(QMainWindow):
             "Manage the intelligence and configuration "
             "behind your Langan AI assistant."
         )
+
         description.setObjectName("muted")
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -452,92 +629,127 @@ class LanganWindow(QMainWindow):
             ("Planning", "Configure the Qwen planning model.", 2),
             ("Premise Prompt", "Control premise generation.", 3),
             ("Web Engine", "Configure web information retrieval.", 4),
-            ("Evidence Prompt", "Configure analogy verification.", 5),
+            ("Evidence Prompt", "Configure analogy verification.", 5)
         ]
 
         for name, description, index in sections:
             button = QPushButton(
                 f"{name}  —  {description}"
             )
+
             button.setMinimumHeight(55)
+
             button.clicked.connect(
                 lambda checked=False, i=index:
                     self.admin_tabs.setCurrentIndex(i)
             )
+
             layout.addWidget(button)
 
         layout.addStretch()
+
         return page
 
+    # -----------------------------------------
+    # LOGIC SETTINGS
+    # -----------------------------------------
 
     def logic_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        layout.addWidget(self.section_title(
-            "Logic",
-            "Manage the Smol model and its reasoning engine."
-        ))
+        layout.addWidget(
+            self.section_title(
+                "Logic",
+                "Manage the Smol model and its reasoning engine."
+            )
+        )
 
         model, self.smol_model = self.model_field(
             "Smol Model",
-            self.config["smol_model"]
+            self.config.get("smol_model", "")
         )
+
         layout.addWidget(model)
 
-        layout.addWidget(QLabel("Logic Engine Prompt"))
+        layout.addWidget(
+            QLabel("Logic Engine Prompt")
+        )
 
         self.logic_prompt = QTextEdit()
+
         self.logic_prompt.setPlainText(
-            self.config["logic_prompt"]
+            self.config.get("logic_prompt", "")
         )
+
         layout.addWidget(self.logic_prompt)
 
         note = QLabel(
-            "The logic engine instructions will guide "
-            "the Smol model during reasoning."
+            "The logic engine instructions guide the Smol model."
         )
+
         note.setObjectName("muted")
         layout.addWidget(note)
 
         return page
 
+    # -----------------------------------------
+    # PLANNING SETTINGS
+    # -----------------------------------------
+
     def planning_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        layout.addWidget(self.section_title(
-            "Planning",
-            "Configure the Qwen planning model."
-        ))
+        layout.addWidget(
+            self.section_title(
+                "Planning",
+                "Configure the Qwen planning model."
+            )
+        )
 
         model, self.planning_model = self.model_field(
             "Qwen Planning Model",
-            self.config["planning_model"]
+            self.config.get("planning_model", "")
         )
+
         layout.addWidget(model)
 
         info = QLabel(
-            "Hugging Face downloading and model activation "
-            "will be implemented in a later stage."
+            "The planning model is configured here. "
+            "Its activation and model switching will be "
+            "connected in a later development stage."
         )
-        info.setObjectName("muted")
-        layout.addWidget(info)
 
+        info.setObjectName("muted")
+        info.setWordWrap(True)
+
+        layout.addWidget(info)
         layout.addStretch()
+
         return page
+
+    # -----------------------------------------
+    # PROMPT SETTINGS
+    # -----------------------------------------
 
     def prompt_page(self, title, key):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        layout.addWidget(self.section_title(
-            title,
-            "Edit the instructions used by this engine."
-        ))
+        layout.addWidget(
+            self.section_title(
+                title,
+                "Edit the instructions used by this engine."
+            )
+        )
 
         editor = QTextEdit()
-        editor.setPlainText(self.config[key])
+
+        editor.setPlainText(
+            self.config.get(key, "")
+        )
+
         layout.addWidget(editor)
 
         if key == "premise_prompt":
@@ -547,64 +759,93 @@ class LanganWindow(QMainWindow):
 
         return page
 
+    # -----------------------------------------
+    # WEB ENGINE SETTINGS
+    # -----------------------------------------
+
     def web_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        layout.addWidget(self.section_title(
-            "Web Engine",
-            "Configure external information retrieval."
-        ))
+        layout.addWidget(
+            self.section_title(
+                "Web Engine",
+                "Configure external information retrieval."
+            )
+        )
 
         self.web_method = QComboBox()
+
         self.web_method.addItems([
             "Tavily",
             "Website URL"
         ])
 
-        current = self.config["web_engine"]
+        current = self.config.get(
+            "web_engine",
+            "Tavily"
+        )
+
         index = self.web_method.findText(current)
 
         if index >= 0:
             self.web_method.setCurrentIndex(index)
 
-        layout.addWidget(QLabel("Retrieval method"))
+        layout.addWidget(
+            QLabel("Retrieval method")
+        )
+
         layout.addWidget(self.web_method)
 
-        layout.addWidget(QLabel("Tavily API Key"))
+        layout.addWidget(
+            QLabel("Tavily API Key")
+        )
 
         self.tavily_key = QLineEdit(
-            self.config["tavily_key"]
+            self.config.get("tavily_key", "")
         )
+
         self.tavily_key.setEchoMode(
             QLineEdit.EchoMode.Password
         )
+
         self.tavily_key.setPlaceholderText(
             "Enter your Tavily API key"
         )
+
         layout.addWidget(self.tavily_key)
 
-        layout.addWidget(QLabel("Website URL"))
+        layout.addWidget(
+            QLabel("Website URL")
+        )
 
         self.website_url = QLineEdit(
-            self.config["website_url"]
+            self.config.get("website_url", "")
         )
+
         self.website_url.setPlaceholderText(
             "https://example.com"
         )
+
         layout.addWidget(self.website_url)
 
         warning = QLabel(
-            "Prototype only: API credentials are currently "
-            "stored in local configuration. We will move "
-            "secrets to secure storage before production."
+            "Web retrieval is not connected yet. "
+            "API credentials are currently stored in "
+            "local configuration."
         )
+
         warning.setObjectName("muted")
         warning.setWordWrap(True)
-        layout.addWidget(warning)
 
+        layout.addWidget(warning)
         layout.addStretch()
+
         return page
+
+    # -----------------------------------------
+    # SAVE SETTINGS
+    # -----------------------------------------
 
     def save_settings(self):
         self.config.update({
@@ -620,11 +861,13 @@ class LanganWindow(QMainWindow):
 
         try:
             save_config(self.config)
+
             QMessageBox.information(
                 self,
                 "Langan",
                 "Configuration saved successfully."
             )
+
         except OSError as error:
             QMessageBox.critical(
                 self,
@@ -632,10 +875,18 @@ class LanganWindow(QMainWindow):
                 str(error)
             )
 
+    # -----------------------------------------
+    # EXIT ADMIN MODE
+    # -----------------------------------------
+
     def exit_admin(self):
         self.admin_mode = False
         self.admin_tabs.setCurrentIndex(0)
         self.show_page(2)
+
+    # -----------------------------------------
+    # APPLICATION THEME
+    # -----------------------------------------
 
     def apply_theme(self):
         self.setStyleSheet("""
@@ -697,6 +948,11 @@ class LanganWindow(QMainWindow):
                 background: #087A45;
             }
 
+            QPushButton:disabled {
+                background: #A8CDB6;
+                color: #F3F8F4;
+            }
+
             QPushButton#nav {
                 background: transparent;
                 color: #18352A;
@@ -733,9 +989,22 @@ class LanganWindow(QMainWindow):
             }
         """)
 
+    # -----------------------------------------
+    # SAFE APPLICATION CLOSING
+    # -----------------------------------------
+
+    def closeEvent(self, event):
+        if self.chat_worker is not None:
+            if self.chat_worker.isRunning():
+                self.chat_worker.wait()
+
+        self.ai.unload_model()
+        event.accept()
+
 
 def main():
     app = QApplication(sys.argv)
+
     app.setApplicationName(APP_NAME)
     app.setFont(QFont("Segoe UI", 10))
 
